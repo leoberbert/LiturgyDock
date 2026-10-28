@@ -1,0 +1,86 @@
+<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Liturgia • Painel OBS</title><style>
+:root{color-scheme:dark;font-family:system-ui,'Segoe UI',sans-serif}*{box-sizing:border-box}body{margin:0;padding:10px;background:#11151c;color:#f7f8fb;font-size:13px}h1{font-size:18px;margin:0}.sub{color:#aebad0;font-size:11px;margin-top:4px}.header{display:flex;justify-content:space-between;align-items:center;gap:10px}.pill{font-size:11px;border-radius:22px;background:#444c5a;padding:5px 9px}.pill.ok{background:#15563e;color:#baffdb}.card{background:#1c2430;border:1px solid #384457;border-radius:10px;padding:12px;margin-top:10px}button{border:0;border-radius:7px;background:#316ce0;color:white;padding:11px 8px;font-weight:650;cursor:pointer}button:hover{filter:brightness(1.12)}button:disabled{opacity:.45;cursor:default}.secondary{background:#39475e}.danger{background:#a52f43}.row{display:flex;gap:7px;align-items:center}.row>*{flex:1}.item{padding:11px 0;border-bottom:1px solid #384457}.item:last-child{border-bottom:0}.itemhead{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.ref{font-size:11px;color:#b6c5dd}.grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}.preview{background:#0b1119;border:1px solid #3a4759;border-radius:8px;white-space:pre-wrap;overflow-wrap:break-word;padding:12px;min-height:90px;max-height:190px;overflow:auto;line-height:1.5}.hint{color:#aebbd0;font-size:11px;line-height:1.5}#log{color:#f2bf92;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:7px}.active{color:#a9f4cf;font-size:11px;margin-top:8px}h2{font-size:13px;margin:0 0 10px}
+</style></head><body>
+<div class="header"><div><h1>✝ Liturgia Diária</h1><div class="sub">Letreiro inferior • OBS Studio</div></div><span class="pill" id="status">Desconectado</span></div>
+<section class="card"><div class="header"><strong>Controle da transmissão</strong><button id="refresh" class="secondary">↻ Atualizar</button></div><div class="hint" style="margin-top:7px">Fonte de navegador: <b>LiturgiaOverlay</b> • Conexão automática</div><div id="day" style="margin-top:9px">Carregando liturgia...</div><div id="log" role="status"></div></section>
+<section class="card"><h2>Exibição ao vivo</h2><div class="hint">Referência fixa e textos paginados. No salmo: refrão duas vezes no início e após cada estrofe. Avance manualmente conforme o cantor.</div><div id="now" class="active">Nenhum texto exibido</div><div id="preview" class="preview" style="margin:9px 0">Escolha um conteúdo abaixo.</div><div class="grid"><button id="prev" class="secondary">← Anterior</button><button id="next">Próximo →</button><button id="show">Exibir seleção</button><button id="hide" class="danger">Ocultar letreiro</button></div></section>
+<section class="card"><h2>Leituras e salmo</h2><div id="items">Aguardando dados...</div></section>
+<script>
+'use strict';
+const API='https://api.leo4linux.pp.ua/liturgia/hoje', WS='ws://127.0.0.1:4455', PASSWORD='123456', SOURCE='LiturgiaOverlay';
+const $=id=>document.getElementById(id);let socket=null,connected=false,pending=new Map(),seq=0,items=[],selection=null,pageIndex=0,live=false;
+const log=m=>$('log').textContent=m||'';const status=(ok,s)=>{$('status').textContent=s;$('status').className='pill'+(ok?' ok':'')};
+// Paginação por largura real (pixels), com limite conservador de três linhas.
+// Preserva cada palavra e mantém a ordem original de todo o texto.
+const MAX_LINES=3, LINE_WIDTH=1450;
+function splitText(text){
+ const canvas=document.createElement('canvas');
+ const ctx=canvas.getContext('2d');
+ ctx.font='500 34px "Segoe UI", Arial, sans-serif';
+ const paragraphs=String(text||'').split(/\n/);
+ const pages=[];let lines=[];
+ function flush(){if(lines.length){pages.push(lines.join('\n'));lines=[]}}
+ function addLine(line){lines.push(line);if(lines.length>=MAX_LINES)flush()}
+ for(const para of paragraphs){
+  const words=para.trim().split(/\s+/).filter(Boolean);
+  if(!words.length){if(lines.length)flush();continue}
+  let line='';
+  for(const word of words){
+   const candidate=line?line+' '+word:word;
+   if(line&&ctx.measureText(candidate).width>LINE_WIDTH){addLine(line);line=word}
+   else line=candidate;
+  }
+  if(line)addLine(line);
+  // Não mistura estrofes/parágrafos na mesma página.
+  flush();
+ }
+ return pages.length?pages:[''];
+}
+function addItem(title,ref,text){if(typeof text!=='string'||!text.trim()||/^não há /i.test(text.trim()))return;items.push({title,ref:ref||'',pages:splitText(text)})}
+// Salmo responsorial: refrao inicial numa unica tela com indicacao (2x); depois de cada estrofe.
+// Cada estrofe permanece inteira (ou paginada) antes de retornar ao refrao.
+function addPsalm(s){
+ const raw=typeof s.texto==='string'?s.texto:'';
+ const refrain=typeof s.refrao==='string'?s.refrao.trim():'';
+ if(!raw.trim()||/^não há /i.test(raw.trim()))return;
+ const stanzas=raw.split(/\r?\n/).map(x=>x.trim()).filter(Boolean);
+ const pages=[],pageLabels=[];
+ function append(text,label){
+  const parts=splitText(text).filter(x=>x.trim());
+  parts.forEach((part,j)=>{
+   pages.push(part);
+   pageLabels.push(label+(parts.length>1?` • parte ${j+1} de ${parts.length}`:''));
+  });
+ }
+ if(refrain){
+  append(refrain+' (2x)','Refrão inicial • cantar 2x');
+ }
+ stanzas.forEach((stanza,i)=>{
+  append(stanza,`Estrofe ${i+1} de ${stanzas.length}`);
+  if(refrain)append(refrain,i===stanzas.length-1?'Refrão final':`Refrão após estrofe ${i+1}`);
+ });
+ if(pages.length)items.push({title:'Salmo',ref:s.referencia||'',pages,pageLabels});
+}
+function build(d){
+items=[];
+for(const [name,o] of [['Primeira leitura',d.primeiraLeitura],['Segunda leitura',d.segundaLeitura]]){
+ if(o&&typeof o==='object'&&typeof o.texto==='string')addItem(name,o.referencia,o.texto);
+}
+if(d.salmo&&typeof d.salmo==='object'){
+ const s=d.salmo;
+ addPsalm(s);
+}
+if(d.evangelho&&typeof d.evangelho==='object'&&typeof d.evangelho.texto==='string')addItem('Evangelho',d.evangelho.referencia,d.evangelho.texto);
+const root=$('items');root.replaceChildren();if(!items.length){root.textContent='Nenhuma leitura disponível para esta data.';return;}items.forEach((it,i)=>{const el=document.createElement('div');el.className='item';const hd=document.createElement('div');hd.className='itemhead';const t=document.createElement('strong');t.textContent=it.title;const r=document.createElement('span');r.className='ref';r.textContent=it.ref;hd.append(t,r);const actions=document.createElement('div');actions.className='grid';const preview=document.createElement('button');preview.className='secondary';preview.textContent='Prévia';preview.onclick=()=>choose(i);const show=document.createElement('button');show.textContent='Exibir no OBS';show.onclick=async()=>{choose(i);await publish()};actions.append(preview,show);el.append(hd,actions);root.append(el)});}
+function choose(i){selection=i;pageIndex=0;updatePreview()}
+function updatePreview() {if(selection===null)return;const it=items[selection];$('preview').textContent=`${it.title.toUpperCase()}${it.ref?' • '+it.ref:''}\n\n${it.pages[pageIndex]}`;$('now').textContent=`${it.title} • ${it.pageLabels?.[pageIndex]||'trecho'} • página ${pageIndex+1} de ${it.pages.length}`;$('prev').disabled=pageIndex===0;$('next').disabled=pageIndex>=it.pages.length-1}
+async function load(){try{const res=await fetch(API,{cache:'no-store'});if(!res.ok)throw Error(`HTTP ${res.status}`);const d=await res.json();if(!d?.liturgia)throw Error('JSON inesperado');$('day').textContent=`${d.data} • ${d.liturgia} • ${d.cor||''}`;build(d);log('Liturgia carregada.')}catch(e){log('Erro na API: '+e.message)}}
+const digest=async s=>{const b=new TextEncoder().encode(s),h=await crypto.subtle.digest('SHA-256',b);return btoa(String.fromCharCode(...new Uint8Array(h)))};
+function handle(d){const p=pending.get(d.requestId);if(!p)return;pending.delete(d.requestId);clearTimeout(p.timer);d.requestStatus?.result?p.resolve(d.responseData):p.reject(Error(d.requestStatus?.comment||'Falha na solicitação'))}
+async function connect(){try{if(connected&&socket?.readyState===1)return true;if(!crypto?.subtle)throw Error('Web Crypto indisponível');const ws=new WebSocket(WS);socket=ws;const hello=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Tempo esgotado')),6000);ws.onerror=()=>{clearTimeout(timer);reject(Error('WebSocket indisponível'))};ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.op===0){clearTimeout(timer);resolve(m.d)}}});const id={rpcVersion:1};if(hello.authentication){const secret=await digest(PASSWORD+hello.authentication.salt);id.authentication=await digest(secret+hello.authentication.challenge)}ws.send(JSON.stringify({op:1,d:id}));await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Autenticação não confirmada')),6000);ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.op===2){clearTimeout(timer);resolve()}else if(m.op===7)handle(m.d)};ws.onclose=()=>{connected=false;status(false,'Desconectado');for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error('Conexão encerrada'))}pending.clear()}});connected=true;status(true,'Conectado');return true}catch(e){connected=false;status(false,'Desconectado');log('Conexão OBS: '+e.message);return false}}
+function call(requestType,requestData){return new Promise((resolve,reject)=>{if(!connected||socket?.readyState!==1)return reject(Error('OBS desconectado'));const requestId=String(++seq);const timer=setTimeout(()=>{pending.delete(requestId);reject(Error('Tempo esgotado'))},7000);pending.set(requestId,{resolve,reject,timer});socket.send(JSON.stringify({op:6,d:{requestType,requestId,requestData}}))})}
+function overlayUrl(payload){const url=new URL('liturgia-overlay.html',location.href);url.searchParams.set('payload',btoa(unescape(encodeURIComponent(JSON.stringify(payload)))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,''));return url.href}
+async function ensureSource(){const inputs=await call('GetInputList',{});const existing=(inputs.inputs||[]).find(x=>x.inputName===SOURCE);if(existing){if(existing.inputKind!=='browser_source')throw Error('A fonte LiturgiaOverlay existe, mas não é Fonte de navegador. Renomeie ou exclua a fonte conflitante.');return}const scenes=await call('GetSceneList',{});const scene=(scenes.scenes||[]).find(x=>x.sceneName.toLowerCase()==='liturgia');if(!scene)throw Error('Crie uma cena chamada LITURGIA antes de exibir o letreiro.');await call('CreateInput',{sceneName:scene.sceneName,inputName:SOURCE,inputKind:'browser_source',inputSettings:{url:overlayUrl({}),width:1920,height:1080,fps:30},sceneItemEnabled:true})}
+async function publish(hide=false){if(!hide&&selection===null){log('Selecione uma leitura primeiro.');return}if(!await connect())return;try{await ensureSource();const it=selection===null?null:items[selection];const payload=hide?{}:{title:it.title,ref:it.ref,text:it.pages[pageIndex],page:it.pages.length>1?`${pageIndex+1} / ${it.pages.length}`:''};await call('SetInputSettings',{inputName:SOURCE,inputSettings:{url:overlayUrl(payload),width:1920,height:1080},overlay:true});live=!hide;log(hide?'Letreiro ocultado.':'Letreiro atualizado no OBS.');if(hide)$('now').textContent='Letreiro ocultado'}catch(e){log('Erro ao exibir: '+e.message)}}
+$('refresh').onclick=load;$('prev').onclick=async()=>{if(selection!==null&&pageIndex>0){pageIndex--;updatePreview();if(live)await publish()}};$('next').onclick=async()=>{if(selection!==null&&pageIndex<items[selection].pages.length-1){pageIndex++;updatePreview();if(live)await publish()}};$('show').onclick=()=>publish();$('hide').onclick=()=>publish(true);$('prev').disabled=true;$('next').disabled=true;load();connect();
+</script></body></html>
