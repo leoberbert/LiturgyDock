@@ -7,7 +7,7 @@
 <section class="card"><h2>Leituras e salmo</h2><div id="items">Aguardando dados...</div></section>
 <script>
 'use strict';
-const API='https://api.leo4linux.pp.ua/liturgia/hoje', WS='ws://127.0.0.1:4455', PASSWORD='123456', SOURCE='LiturgiaOverlay';
+const API='https://liturgia.up.railway.app/v2/', WS='ws://127.0.0.1:4455', PASSWORD='123456', SOURCE='LiturgiaOverlay';
 const $=id=>document.getElementById(id);let socket=null,connected=false,pending=new Map(),seq=0,items=[],selection=null,pageIndex=0,live=false;
 const log=m=>$('log').textContent=m||'';const status=(ok,s)=>{$('status').textContent=s;$('status').className='pill'+(ok?' ok':'')};
 // Paginação por largura real (pixels), com limite conservador de três linhas.
@@ -39,7 +39,7 @@ function splitText(text){
 function addItem(title,ref,text){if(typeof text!=='string'||!text.trim()||/^não há /i.test(text.trim()))return;items.push({title,ref:ref||'',pages:splitText(text)})}
 // Salmo responsorial: refrao inicial numa unica tela com indicacao (2x); depois de cada estrofe.
 // Cada estrofe permanece inteira (ou paginada) antes de retornar ao refrao.
-function addPsalm(s){
+function addPsalm(s,title='Salmo'){
  const raw=typeof s.texto==='string'?s.texto:'';
  const refrain=typeof s.refrao==='string'?s.refrao.trim():'';
  if(!raw.trim()||/^não há /i.test(raw.trim()))return;
@@ -59,22 +59,33 @@ function addPsalm(s){
   append(stanza,`Estrofe ${i+1} de ${stanzas.length}`);
   if(refrain)append(refrain,i===stanzas.length-1?'Refrão final':`Refrão após estrofe ${i+1}`);
  });
- if(pages.length)items.push({title:'Salmo',ref:s.referencia||'',pages,pageLabels});
+ if(pages.length)items.push({title,ref:s.referencia||'',pages,pageLabels});
 }
 function build(d){
 items=[];
-for(const [name,o] of [['Primeira leitura',d.primeiraLeitura],['Segunda leitura',d.segundaLeitura]]){
- if(o&&typeof o==='object'&&typeof o.texto==='string')addItem(name,o.referencia,o.texto);
+const leituras=d.leituras&&typeof d.leituras==='object'?d.leituras:{};
+function addList(fallback,list){
+ if(!Array.isArray(list))return;
+ list.forEach((o,i)=>{
+  if(!o||typeof o!=='object'||typeof o.texto!=='string')return;
+  const base=o.tipo||fallback;
+  addItem(list.length>1&&!o.tipo?`${base} ${i+1}`:base,o.referencia,o.texto);
+ });
 }
-if(d.salmo&&typeof d.salmo==='object'){
- const s=d.salmo;
- addPsalm(s);
-}
-if(d.evangelho&&typeof d.evangelho==='object'&&typeof d.evangelho.texto==='string')addItem('Evangelho',d.evangelho.referencia,d.evangelho.texto);
+addList('Primeira leitura',leituras.primeiraLeitura);
+const salmos=Array.isArray(leituras.salmo)?leituras.salmo:[];
+salmos.forEach((s,i)=>{if(s&&typeof s==='object')addPsalm(s,salmos.length>1?`Salmo ${i+1}`:'Salmo')});
+addList('Segunda leitura',leituras.segundaLeitura);
+(Array.isArray(leituras.extras)?leituras.extras:[]).forEach(o=>{
+ if(!o||typeof o!=='object'||typeof o.texto!=='string')return;
+ if(typeof o.refrao==='string'&&o.refrao.trim())addPsalm(o,o.tipo||o.titulo||'Salmo');
+ else addItem(o.tipo||o.titulo||'Leitura',o.referencia,o.texto);
+});
+addList('Evangelho',leituras.evangelho);
 const root=$('items');root.replaceChildren();if(!items.length){root.textContent='Nenhuma leitura disponível para esta data.';return;}items.forEach((it,i)=>{const el=document.createElement('div');el.className='item';const hd=document.createElement('div');hd.className='itemhead';const t=document.createElement('strong');t.textContent=it.title;const r=document.createElement('span');r.className='ref';r.textContent=it.ref;hd.append(t,r);const actions=document.createElement('div');actions.className='grid';const preview=document.createElement('button');preview.className='secondary';preview.textContent='Prévia';preview.onclick=()=>choose(i);const show=document.createElement('button');show.textContent='Exibir no OBS';show.onclick=async()=>{choose(i);await publish()};actions.append(preview,show);el.append(hd,actions);root.append(el)});}
 function choose(i){selection=i;pageIndex=0;updatePreview()}
 function updatePreview() {if(selection===null)return;const it=items[selection];$('preview').textContent=`${it.title.toUpperCase()}${it.ref?' • '+it.ref:''}\n\n${it.pages[pageIndex]}`;$('now').textContent=`${it.title} • ${it.pageLabels?.[pageIndex]||'trecho'} • página ${pageIndex+1} de ${it.pages.length}`;$('prev').disabled=pageIndex===0;$('next').disabled=pageIndex>=it.pages.length-1}
-async function load(){try{const res=await fetch(API,{cache:'no-store'});if(!res.ok)throw Error(`HTTP ${res.status}`);const d=await res.json();if(!d?.liturgia)throw Error('JSON inesperado');$('day').textContent=`${d.data} • ${d.liturgia} • ${d.cor||''}`;build(d);log('Liturgia carregada.')}catch(e){log('Erro na API: '+e.message)}}
+async function load(){try{const res=await fetch(API,{cache:'no-store'});if(!res.ok)throw Error(`HTTP ${res.status}`);const d=await res.json();if(!d?.liturgia||!d?.leituras)throw Error('JSON inesperado');$('day').textContent=`${d.data} • ${d.liturgia} • ${d.cor||''}`;build(d);log('Liturgia carregada.')}catch(e){log('Erro na API: '+e.message)}}
 const digest=async s=>{const b=new TextEncoder().encode(s),h=await crypto.subtle.digest('SHA-256',b);return btoa(String.fromCharCode(...new Uint8Array(h)))};
 function handle(d){const p=pending.get(d.requestId);if(!p)return;pending.delete(d.requestId);clearTimeout(p.timer);d.requestStatus?.result?p.resolve(d.responseData):p.reject(Error(d.requestStatus?.comment||'Falha na solicitação'))}
 async function connect(){try{if(connected&&socket?.readyState===1)return true;if(!crypto?.subtle)throw Error('Web Crypto indisponível');const ws=new WebSocket(WS);socket=ws;const hello=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Tempo esgotado')),6000);ws.onerror=()=>{clearTimeout(timer);reject(Error('WebSocket indisponível'))};ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.op===0){clearTimeout(timer);resolve(m.d)}}});const id={rpcVersion:1};if(hello.authentication){const secret=await digest(PASSWORD+hello.authentication.salt);id.authentication=await digest(secret+hello.authentication.challenge)}ws.send(JSON.stringify({op:1,d:id}));await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Autenticação não confirmada')),6000);ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.op===2){clearTimeout(timer);resolve()}else if(m.op===7)handle(m.d)};ws.onclose=()=>{connected=false;status(false,'Desconectado');for(const p of pending.values()){clearTimeout(p.timer);p.reject(Error('Conexão encerrada'))}pending.clear()}});connected=true;status(true,'Conectado');return true}catch(e){connected=false;status(false,'Desconectado');log('Conexão OBS: '+e.message);return false}}
